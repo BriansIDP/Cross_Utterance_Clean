@@ -141,27 +141,13 @@ embmultsize = args.outputcell
 if args.outputcell == 0:
     embmultsize = 1
 
+# Tools
 def showmem():
     for obj in gc.get_objects():
         try:
             if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
                 print(type(obj), obj.size())
         except: pass
-
-def read_in_dict():
-    # Read in dictionary
-    logging("Reading dictionary...")
-    dictionary = {}
-    with open(os.path.join(args.data, 'dictionary.txt')) as vocabin:
-        lines = vocabin.readlines()
-        ntoken = len(lines)
-        for line in lines:
-            ind, word = line.strip().split(' ')
-            if word not in dictionary:
-                dictionary[word] = ind
-            else:
-                logging("Error! Repeated words in the dictionary!")
-    return ntoken, dictionary
 
 def get_needed_utterance(utt_index, utt_prev, utt_post, bsz, bptt):
     prev_context = torch.index_select(utt_prev, 0, utt_index)
@@ -188,7 +174,9 @@ def get_batch_ngram(source, i):
     return target
 
 def load_utt_embeddings(setname):
-    return torch.load(args.saveprefix+setname+'_utt_embed.pt'), torch.load(args.saveprefix+setname+'_fullind.pt'), torch.load(args.saveprefix+setname+'_embind.pt')
+    return (torch.load(args.saveprefix+setname+'_utt_embed.pt'),
+            torch.load(args.saveprefix+setname+'_fullind.pt'),
+	    torch.load(args.saveprefix+setname+'_embind.pt'))
 
 def batchify(data, embind, bsz):
     # Work out how cleanly we can divide the dataset into bsz parts.
@@ -224,30 +212,19 @@ def debug_print_params(model):
         if param.requires_grad:
             print (name, param.data)
 
-def get_letter_word_emb(model, ntokens):
-    model.eval()
-    dictionary_tensor = torch.LongTensor([i for i in range(ntokens)])
-    hidden = model.init_hidden(1)
-    letter_encoding = []
-    for wordid in dictionary_tensor:
-        letter_encoding.append(dictionary.get_trigram(wordid).view(1, 1,-1))
-    encoded = torch.cat(letter_encoding, 1)
-    with torch.no_grad():
-        emb = model(dictionary_tensor.view(1, -1).to(device), hidden, encoded.to(device), outputflag=1)
-    return emb[0]
-
-def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FLvmodel, ids_dict, embeddings):
+def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
+             FLvmodel, ids_dict):
     # Turn on evaluation mode which disables dropout.
     model.eval()
     model.set_mode('eval')
     FLvmodel.eval()
     FLvmodel.set_mode('eval')
+    # Reset losses and counts
     total_loss = 0.
     total_words = 0.
     hidden = model.init_hidden(eval_batch_size)
     # Embedding tensor
     emb_size = FLvmodel.nhid
-    # utt_embeddings = torch.zeros(maxlen, emb_size).to(device)
     prev_batched_embeddings = None
     post_batched_embeddings = None
     with torch.no_grad():
@@ -255,7 +232,8 @@ def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FL
             data, ind, targets, seq_len = get_batch(evaldata, sent_ind_batched, i)
             # check if the batch context idices are already filled
             if batch not in ids_dict:
-                prev_utts, post_utts = get_needed_utterance(ind.view(-1), utt_dict_prev, utt_dict_post, eval_batch_size, seq_len) 
+                prev_utts, post_utts = get_needed_utterance(
+		    ind.view(-1), utt_dict_prev, utt_dict_post, eval_batch_size, seq_len) 
                 ids_dict[batch] = (prev_utts, post_utts)
             else:
                 prev_utts, post_utts = ids_dict[batch]
@@ -264,25 +242,27 @@ def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FL
             FLvbatchsize = prev_utts_tensor.size(0)
             # Forward previous context information
             batched_embeddings = None
-            if args.useletter:
-                prev_batched_embeddings = get_batch_emb(embeddings, prev_utts_tensor.to(device)).transpose(0,1)
-                post_batched_embeddings = get_batch_emb(embeddings, post_utts_tensor.to(device)).transpose(0,1)
             if args.useatten:
                 FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
                 if args.maxlen_prev != 0:
-                    prev_extracted, prevpenalty = FLvmodel(prev_utts_tensor.t().contiguous().to(device), FLvhidden, device=device, eosidx=eosidx)
+                    prev_extracted, prevpenalty = FLvmodel(
+		        prev_utts_tensor.t().contiguous().to(device), FLvhidden, device, eosidx)
                 else:
-                    prev_extracted, prevpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+                    prev_extracted, prevpenalty = (
+		        torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
                 FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
                 if args.maxlen_post != 0:
-                    post_extracted, postpenalty = FLvmodel(post_utts_tensor.t().contiguous().to(device), FLvhidden, device=device, eosidx=eosidx)
+                    post_extracted, postpenalty = FLvmodel(
+		        post_utts_tensor.t().contiguous().to(device), FLvhidden, device, eosidx)
                 else:
-                    post_extracted, postpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+                    post_extracted, postpenalty = (
+		        torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
                 auxinput = torch.cat([prev_extracted, post_extracted], 1)
                 auxinput = auxinput.view(seq_len, eval_batch_size, -1)
 
             # Here begins the forward path for second level LM
-            output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device, nonlinearity=False)
+            output, hidden, penalty = model(
+	        data, auxinput, hidden, eosidx=eosidx, device=device)
             output_flat = output.view(-1, ntokens)
             total_loss += criterion(output_flat, targets).data * len(data)
             total_words += len(data)
@@ -290,7 +270,17 @@ def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FL
             
     return total_loss, total_words, ids_dict
 
-def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FLvmodel, ids_dict, epoch, embeddings):
+def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
+          FLvmodel, ids_dict, epoch):
+    """traindata: input data
+       sent_ind_batched: sentence indices associated with the input data
+       utt_dict_prev: previous utterance list
+       utt_dict_post: future utterance list
+       model: second level LM
+       FLvmodel: first level LM
+       ids_dict: processed batch cached
+       epoch: current epoch number
+    """
     total_loss = 0.
     total_penalty = 0.
     model.train()
@@ -319,7 +309,8 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FLvm
         data, ind, targets, seq_len = get_batch(traindata, sent_ind_batched, i)
         # check if the batch context idices are already filled
         if batch not in ids_dict:
-            prev_utts, post_utts = get_needed_utterance(ind.view(-1), utt_dict_prev, utt_dict_post, args.batchsize, seq_len)
+            prev_utts, post_utts = get_needed_utterance(ind.view(-1), utt_dict_prev,
+	        utt_dict_post, args.batchsize, seq_len)
             ids_dict[batch] = (prev_utts, post_utts)
         else:
             prev_utts, post_utts = ids_dict[batch]
@@ -329,18 +320,21 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FLvm
         # Forward previous context information
 
         batched_embeddings = None
-        if args.useletter:
-            prev_batched_embeddings = get_batch_emb(embeddings, prev_utts_tensor.to(device)).transpose(0,1)
-            post_batched_embeddings = get_batch_emb(embeddings, post_utts_tensor.to(device)).transpose(0,1)
         if args.useatten:
             FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
             if args.maxlen_prev != 0:
-                prev_extracted, prevpenalty = FLvmodel(prev_utts_tensor.t().contiguous().to(device), FLvhidden, device=device, emb=prev_batched_embeddings, eosidx=eosidx)
+                prev_extracted, prevpenalty = FLvmodel(prev_utts_tensor.t().contiguous().to(device),
+		                                       FLvhidden,
+						       device=device,
+						       eosidx=eosidx)
             else:
                 prev_extracted, prevpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
             FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
             if args.maxlen_post != 0:
-                post_extracted, postpenalty = FLvmodel(post_utts_tensor.t().contiguous().to(device), FLvhidden, device=device, emb=post_batched_embeddings, eosidx=eosidx)
+                post_extracted, postpenalty = FLvmodel(post_utts_tensor.t().contiguous().to(device),
+		                                       FLvhidden,
+						       device=device,
+						       eosidx=eosidx)
             else:
                 post_extracted, postpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
             auxinput = torch.cat([prev_extracted, post_extracted], 1)
@@ -348,9 +342,8 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model, FLvm
             FLvpenalty = prevpenalty + postpenalty
 
         hidden = repackage_hidden(hidden)
-        # model.zero_grad()
-        
-        output, hidden, penalty = model(data, auxinput, hidden, separate=args.reset, eosidx=eosidx, device=device)
+        # Forward for the second level LM
+        output, hidden, penalty = model(data, auxinput, hidden, eosidx=eosidx, device=device)
 
         loss = criterion(output.view(-1, ntokens), targets)
 
@@ -410,40 +403,44 @@ def display_parameters(model):
 # ---------------------
 # Main code starts here
 # ---------------------
-ntokens, dictionary = read_in_dict()
-eosidx = int(dictionary['<eos>'])
 # Data loading
 dictfile = os.path.join(args.data, 'dictionary.txt')
 
 if args.use_sampling:
-    train_loader, val_loader, test_loader, dictionary = L2joint_dataloader_atten.create(args.data, dictfile, batchSize=1, workers=0, maxlen_prev=args.maxlen_prev, maxlen_post=args.maxlen_post, use_sampling=True, errorfile=args.errorfile, reference=args.reference)
-
+    train_loader, val_loader, test_loader, dictionary = L2joint_dataloader_atten.create(
+        args.data, dictfile, batchSize=1, workers=0, maxlen_prev=args.maxlen_prev,
+	maxlen_post=args.maxlen_post, use_sampling=True, errorfile=args.errorfile,
+	reference=args.reference)
     train_loader.dataset.dictionary.use_sampling = False
     val_loader.dataset.dictionary.use_sampling = False
     test_loader.dataset.dictionary.use_sampling = False
 else:
-    train_loader, val_loader, test_loader, dictionary = L2joint_dataloader_atten.create(args.data, dictfile, batchSize=1, workers=0, maxlen_prev=args.maxlen_prev, maxlen_post=args.maxlen_post)
+    train_loader, val_loader, test_loader, dictionary = L2joint_dataloader_atten.create(
+        args.data, dictfile, batchSize=1, workers=0, maxlen_prev=args.maxlen_prev,
+	maxlen_post=args.maxlen_post)
+ntokens = len(dictionary.idx2word)
+eosidx = dictionary.word2idx['<eos>']
+
 # Model and optimizer instantiation
 logging('Instantiating models and criteria')
-natten = 0
 FLvpretrained = torch.load(args.FLvmodel)
-embeddings = None
-if args.useletter:
-    embeddings = get_letter_word_emb(FLvpretrained, ntokens)
 if not args.evalmode:
     if args.useatten:
-        FLvmodel = AttenFlvModel(ntokens, args.emsize, args.nhid, args.nlayers, args.nhid, args.dropout, nhead=args.nhead, letter=args.useletter).to(device)
-        # May use letter-based embeddings in which case do not load encoder
-        if not args.useletter:
-            FLvmodel.encoder.load_state_dict(FLvpretrained.encoder.state_dict())
+        FLvmodel = AttenFlvModel(ntokens, args.emsize, args.nhid, args.nlayers,
+	                         args.nhid, args.dropout, nhead=args.nhead).to(device)
+        FLvmodel.encoder.load_state_dict(FLvpretrained.encoder.state_dict())
         FLvmodel.rnn.load_state_dict(FLvpretrained.rnn.state_dict())
         FLvmodel.rnn.flatten_parameters()
     elif args.scratch:
-        FLvmodel = RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.dropout, reset=args.reset).to(device)
+        FLvmodel = RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers,
+	                    args.dropout, args.dropout, reset=args.reset).to(device)
     else:
         FLvmodel = torch.load(args.FLvmodel)
         FLvmodel.rnn.flatten_parameters()
-    model = L2RNNModel(args.model, ntokens, args.emsize, FLvmodel.nhid*args.nhead*2, args.naux, args.nhid, args.nlayers, natten, args.dropout, reset=args.reset, nhead=args.nhead).to(device)
+    # Here set atten flag to be False for 2nd level LM
+    model = L2RNNModel(args.model, ntokens, args.emsize, FLvmodel.nhid, args.nhead*2,
+                       args.naux, args.nhid, args.nlayers, False, args.dropout, reset=args.reset,
+		       nhead=args.nhead).to(device)
 criterion = nn.CrossEntropyLoss()
 interpCrit = nn.CrossEntropyLoss(reduction='none')
 
@@ -473,7 +470,14 @@ if not args.evalmode:
                         # check for this particular scp whether context is filled
                         if j not in train_ids_dict_list[i]:
                             train_ids_dict_list[i][j] = {}
-                        model, FLvmodel, train_ids_dict_list[i][j] = train(data, sent_ind_batched, sent_dict_prev, sent_dict_post, model, FLvmodel, train_ids_dict_list[i][j], epoch, embeddings)
+                        model, FLvmodel, train_ids_dict_list[i][j] = train(data,
+			                                                   sent_ind_batched,
+									   sent_dict_prev,
+									   sent_dict_post,
+									   model,
+									   FLvmodel,
+									   train_ids_dict_list[i][j],
+									   epoch)
                 logging('time elapsed is {:5.2f}s'.format((time.time() - epoch_start_time)))
 
             # Process an additional epoch for error sampling every 3 epochs
@@ -486,7 +490,14 @@ if not args.evalmode:
                     for j, segment in enumerate(train_batched):
                         input_seg_file, sent_ind, sent_dict_prev, sent_dict_post = segment
                         data, sent_ind_batched = batchify(input_seg_file, sent_ind, args.batchsize)
-                        model, FLvmodel, _ = train(data, sent_ind_batched, sent_dict_prev, sent_dict_post, model, FLvmodel, {}, epoch, embeddings)
+                        model, FLvmodel, _ = train(data,
+			                           sent_ind_batched,
+						   sent_dict_prev,
+						   sent_dict_post,
+						   model,
+						   FLvmodel,
+						   {},
+						   epoch)
                 logging('time elapsed is {:5.2f}s'.format((time.time() - additional_epoch_start_time)))
                 # Turn off error sampling
                 train_loader.dataset.dictionary.use_sampling = False
@@ -505,11 +516,16 @@ if not args.evalmode:
                     # check for this particular scp whether context is filled
                     if j not in valid_ids_dict_list[i]:
                         valid_ids_dict_list[i][j] = {}
-                    val_loss, num_of_words, valid_ids_dict_list[i][j] = evaluate(data, sent_ind_batched, sent_dict_prev, sent_dict_post, model, FLvmodel, valid_ids_dict_list[i][j], embeddings)
+                    val_loss, num_of_words, valid_ids_dict_list[i][j] = evaluate(data,
+		                                                                 sent_ind_batched,
+										 sent_dict_prev,
+										 sent_dict_post,
+										 model,
+										 FLvmodel,
+										 valid_ids_dict_list[i][j])
                     aggregate_valloss = aggregate_valloss + val_loss
                     total_valset += num_of_words
             val_loss = aggregate_valloss / total_valset
-            # val_loss = evaluate(valdata, valutt_embeddings.view(-1, valutt_embeddings.size(2)), valembind_batched, model, ntokens, writeout=True)
             logging('-' * 89)
             logging('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
                     'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
@@ -525,7 +541,13 @@ if not args.evalmode:
                     for j, segment in enumerate(val_batched):
                         input_seg_file, sent_ind, sent_dict_prev, sent_dict_post = segment
                         data, sent_ind_batched = batchify(input_seg_file, sent_ind, eval_batch_size)
-                        sampled_val_loss, num_of_words, _ = evaluate(data, sent_ind_batched, sent_dict_prev, sent_dict_post, model, FLvmodel, {}, embeddings)
+                        sampled_val_loss, num_of_words, _ = evaluate(data,
+			                                             sent_ind_batched,
+								     sent_dict_prev,
+								     sent_dict_post,
+								     model,
+								     FLvmodel,
+								     {})
                         sampled_aggre_valloss = sampled_aggre_valloss + sampled_val_loss
                         sampled_total += num_of_words
                 sampled_val_loss = sampled_aggre_valloss / sampled_total
@@ -574,7 +596,13 @@ if args.evalmode:
             # check for this particular scp whether context is filled
             if j not in valid_ids_dict_list[i]:
                 valid_ids_dict_list[i][j] = {}
-            val_loss, num_of_words, valid_ids_dict_list[i][j] = evaluate(data, sent_ind_batched, sent_dict_prev, sent_dict_post, model, FLvmodel, valid_ids_dict_list[i][j], embeddings)
+            val_loss, num_of_words, valid_ids_dict_list[i][j] = evaluate(data,
+	                                                                 sent_ind_batched,
+									 sent_dict_prev,
+									 sent_dict_post,
+									 model,
+									 FLvmodel,
+									 valid_ids_dict_list[i][j])
             aggregate_valloss = aggregate_valloss + val_loss
             total_valset += num_of_words
     val_loss = aggregate_valloss / total_valset
@@ -595,11 +623,16 @@ for i, test_batched in enumerate(test_loader):
         data, sent_ind_batched = batchify(input_seg_file, sent_ind, eval_batch_size)
         if j not in test_ids_dict_list[i]:
             test_ids_dict_list[i][j] = {}
-        test_loss, num_of_words, test_ids_dict_list[i][j] = evaluate(data, sent_ind_batched, sent_dict_prev, sent_dict_post, model, FLvmodel, test_ids_dict_list[i][j], embeddings)
+        test_loss, num_of_words, test_ids_dict_list[i][j] = evaluate(data,
+	                                                             sent_ind_batched,
+								     sent_dict_prev,
+								     sent_dict_post,
+								     model,
+								     FLvmodel,
+								     test_ids_dict_list[i][j])
         aggregate_testloss = aggregate_testloss + test_loss
         total_testset += num_of_words
 test_loss = aggregate_testloss / total_testset
-# test_loss = evaluate(testdata, testutt_embeddings.view(-1, testutt_embeddings.size(2)), testembind_batched, model, ntokens, ngramProb=TestNgramProbs)
 logging('=' * 89)
 logging('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
     test_loss, math.exp(test_loss)))
