@@ -9,38 +9,10 @@ class Dictionary(object):
         self.word2idx = {}
         self.idx2word = []
         self.unigram = []
-        self.letter_trigram, self.count = self.build_letter_trigram()
         self.build_dict(dictfile)
         self.use_sampling = use_sampling
         if use_sampling:
             self.sampler = ErrorSampling(dictfile, errorfile, reference)
-
-    def build_letter_trigram(self):
-        letter_trigram = {}
-        upperalpha_extended = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ!\'-'
-        upperalpha = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ\'-.'
-        upperalpha_ending = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ$\'.'
-        count = 0
-        for i in upperalpha_extended:
-            if i not in letter_trigram:
-                letter_trigram[i] = {}
-            for j in upperalpha:
-                if j not in letter_trigram[i]:
-                    letter_trigram[i][j] = {}
-                for k in upperalpha:
-                    letter_trigram[i][j][k] = count
-                    count += 1
-        return letter_trigram, count
-
-    def get_trigram(self, idx):
-        word = self.idx2word[idx]
-        extendedword = '!' + word + '$'
-        letter_vec = torch.zeros(self.count)
-        if idx != self.get_eos() and idx != self.get_sos():
-            for i in range(len(extendedword)-3):
-                index = self.letter_trigram[extendedword[i]][extendedword[i+1]][extendedword[i+2]]
-                letter_vec[index] = 1
-        return torch.tensor(letter_vec).view(1, -1)
 
     def build_dict(self, dictfile):
         with open(dictfile, 'r', encoding="utf8") as f:
@@ -68,9 +40,11 @@ class Dictionary(object):
         for word in sentence:
             to_append = self.word2idx[word] if word in self.word2idx else self.word2idx['OOV']
             sent.append(to_append)
+	    # Randomly introduce acoustic errors
             if self.use_sampling:
                 substitute = self.sampler.sample(word)
-                sampled_sent.append(self.word2idx[substitute] if substitute in self.word2idx else to_append)
+                sampled_sent.append(
+		    self.word2idx[substitute] if substitute in self.word2idx else to_append)
         if self.use_sampling:
             return sent, sampled_sent
         return sent, sent
@@ -149,7 +123,9 @@ class LMdata(Dataset):
 def collate_fn(batch):
     return [f for f in batch]
 
-def create(datapath, dictfile, batchSize=1, shuffle=False, workers=0, maxlen_prev=30, maxlen_post=30, use_sampling=False, errorfile='', reference=''):
+def create(datapath, dictfile, batchSize=1,
+           shuffle=False, workers=0, maxlen_prev=30,
+	   maxlen_post=30, use_sampling=False, errorfile='', reference=''):
     loaders = []
     dictionary = Dictionary(dictfile, use_sampling, errorfile, reference)
     for split in ['train', 'valid', 'test']:
