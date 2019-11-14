@@ -6,16 +6,32 @@ from SelfAtten import SelfAttenModel
 class L2RNNModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder."""
 
-    def __init__(self, rnn_type, ntoken, ninp, nutt, naux, nhid, nlayers, natten=0, dropout=0.5, dropaux=0.5, tie_weights=False, reset=0, nhead=1):
+    def __init__(self, rnn_type, ntoken, ninp, nutt, nseg, naux, nhid, nlayers, atten=False,
+                 dropout=0.5, dropaux=0.5, tie_weights=False, reset=0, nhead=1):
+        """rnn_type: choose from LSTM, RNN and GRU
+           ntoken: vocabulary size
+	   ninp: word embedding dimension
+	   nutt: utterance embedding dimension
+	   naux: auxiliary feature dimension
+	   nhid: hidden state dimension
+	   nlayers: number of RNN layers
+	   nseg: number of segments
+	   atten: whether to use attention for second level LM
+	   dropout, dropaux: dropout rates
+	   tie_weights: tie input/output weight matrices
+	   reset: reset at utterance boundaries
+	   nhead: number of attention heads
+        """
         super(L2RNNModel, self).__init__()
         self.drop = nn.Dropout(dropout)
         self.encoder = nn.Embedding(ntoken, ninp)
         # instantiate attention output layer
-        if natten != 0:
-            self.selfatten = SelfAttenModel(natten, natten, nhead)
-            self.comp4atten = nn.Linear(natten*nhead, naux)
+        if atten:
+            self.selfatten = SelfAttenModel(nutt, nutt, nhead)
+            self.comp4atten = nn.Linear(nutt*nhead, naux)
+        else:
+            self.compressor = nn.Linear(nutt*nseg, naux)
         self.compressDrop = nn.Dropout(dropaux)
-        self.compressor = nn.Linear(nutt, naux)
         self.compressReLU = nn.ReLU()
         self.compressSig = nn.Sigmoid()
         self.compressTanh = nn.Tanh()
@@ -34,16 +50,15 @@ class L2RNNModel(nn.Module):
                 raise ValueError('When using the tied flag, nhid must be equal to emsize')
             self.decoder.weight = self.encoder.weight
 
-        self.init_weights()
-
         self.rnn_type = rnn_type
         self.nhid = nhid
-        self.natten = natten
+        self.atten = atten
         self.naux = naux
         self.nhead = nhead
         self.nlayers = nlayers
         self.reset = reset
         self.mode = 'train'
+        self.init_weights()
 
     def set_mode(self, m):
         self.mode = m
@@ -51,29 +66,30 @@ class L2RNNModel(nn.Module):
     def init_weights(self):
         initrange = 0.1
         self.encoder.weight.data.uniform_(-initrange, initrange)
-        self.compressor.bias.data.zero_()
-        self.compressor.weight.data.uniform_(-initrange, initrange)
+        if self.atten:
+            self.comp4atten.bias.data.zero_()
+            self.comp4atten.weight.data.uniform_(-initrange, initrange)
+        else:
+            self.compressor.bias.data.zero_()
+            self.compressor.weight.data.uniform_(-initrange, initrange)
         self.decoder.bias.data.zero_()
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, input, auxiliary, hidden, separate=0, eosidx = 0, target=None, device='cuda', writeout=False, nonlinearity=False):
+    def forward(self, input, auxiliary, hidden, eosidx = 0, target=None, device='cuda'):
         emb = self.drop(self.encoder(input))
         penalty = zeros(1).to(device)
-        if self.natten != 0:
-            auxiliary_in, penalty = self.selfatten(auxiliary.view(auxiliary.size(0)*auxiliary.size(1), -1), device=device, writeout=writeout)
-            if self.natten * self.nhead != self.naux:
+        bsz = auxiliary.size(0)*auxiliary.size(1)
+        if self.atten:
+            auxiliary_in, penalty = self.selfatten(auxiliary.view(bsz, -1), device=device)
+            if self.nutt * self.nhead != self.naux:
                 auxiliary_in = self.comp4atten(auxiliary_in)
                 auxiliary_in = self.compressDrop(auxiliary_in)
-                # auxiliary_in = self.compressReLU(auxiliary_in)
         else:
-            if nonlinearity:
-                auxiliary = self.compressTanh(auxiliary)
-            auxiliary_in = self.compressor(auxiliary.view(auxiliary.size(0)*auxiliary.size(1), auxiliary.size(2)))
-            # auxiliary_in = self.compressDrop(auxiliary_in)
+            auxiliary_in = self.compressor(auxiliary.view(bsz, auxiliary.size(2)))
             auxiliary_in = self.compressDrop(auxiliary_in)
         to_input = cat([auxiliary_in.view(auxiliary.size(0), auxiliary.size(1), -1), emb], 2)
         output_list = []
-        if separate == 1:
+        if self.reset:
             for i in range(emb.size(0)):
                 hidden = self.resetsent(hidden, input[i,:], eosidx)
                 each_output, hidden = self.rnn(to_input[i,:,:].view(1,emb.size(1),-1), hidden)
