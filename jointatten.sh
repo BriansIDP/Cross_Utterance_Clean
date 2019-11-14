@@ -20,7 +20,7 @@ python jointtrain_singleseg.py \
     --FLlr 0.5 \
     --clip 0.25 \
     --FLvclip 0.5 \
-    --batchsize 64 \
+    --batchsize 1 \
     --wdecay 2e-6 \
     --bptt 12 \
     --naux 512 \
