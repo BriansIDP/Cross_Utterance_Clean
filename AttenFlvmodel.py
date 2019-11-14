@@ -24,11 +24,20 @@ class PositionalEmbedding(nn.Module):
 class AttenFlvModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder."""
 
-    def __init__(self, ntoken, ninp, nhid, nlayers, nmid, dropout=0.5, tie_weights=False, reset=0, nhead=1, letter=False):
+    def __init__(self, ntoken, ninp, nhid, nlayers, nmid,
+                 dropout=0.5, tie_weights=False, reset=0, nhead=1):
+        """ntoken: vocabulary size
+           ninp: word emb size
+           nhid: hidden state size
+           nlayers: number of RNN layers
+           nmid: attention middle layer size
+           dropout: RNN dropout rate
+           reset: sentence boundary resetting
+           nhead: number of attention heads
+	"""
         super(AttenFlvModel, self).__init__()
         self.drop = nn.Dropout(dropout)
-        if not letter:
-            self.encoder = nn.Embedding(ntoken, ninp)
+        self.encoder = nn.Embedding(ntoken, ninp)
         self.selfatten = SelfAttenModel(nhid, nmid, nhead)
         self.rnn = nn.LSTM(ninp, nhid, nlayers, dropout=dropout)
         self.pos_emb = PositionalEmbedding(ninp)
@@ -42,7 +51,7 @@ class AttenFlvModel(nn.Module):
         self.nhead = nhead
         self.nlayers = nlayers
         self.ninp = ninp
-        self.letter = letter
+        self.reset = reset
         self.mode = 'train'
 
     def set_mode(self, m):
@@ -52,8 +61,13 @@ class AttenFlvModel(nn.Module):
         initrange = 0.1
         self.encoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, input, hidden, device='cuda', emb=None, reset=False, eosidx=1, direct=False):
-        # if not self.letter:
+    def forward(self, input, hidden, device='cuda', eosidx=1, direct=False):
+        """input: word idx
+           hidden: initial/carries hidden states
+           device: cuda or cpu
+           eosidx: end of sequence idx
+           direct: use word embeddings directly or after LSTM encoding
+        """
         emb = self.drop(self.encoder(input))
         if direct:
             # Adding positional encoding
@@ -64,7 +78,7 @@ class AttenFlvModel(nn.Module):
             output = self.emb_drop(output)
             output = emb
         else:
-            if reset:
+            if self.reset:
                 output_list = []
                 for i in range(emb.size(0)):
                     resethidden = self.resetsent(hidden, input[i,:], eosidx)
