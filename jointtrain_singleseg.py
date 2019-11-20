@@ -94,6 +94,8 @@ parser.add_argument('--errorfile', type=str, default='confusion.txt',
                     help='location of the confusion pair file')
 parser.add_argument('--reference', type=str, default='train.ref',
                     help='location of the reference file')
+parser.add_argument('--ratio', type=float, default=1,
+                    help='error sampling ratio')
 args = parser.parse_args()
 
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -287,7 +289,7 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
     model.set_mode('train')
     FLvmodel.train()
     model.zero_grad()
-    if epoch <= 1 and not args.scratch: 
+    if epoch < 1 and not args.scratch: 
         logging('Not updating first level LM for this epoch!')
         FLvmodel.set_mode('eval')
     else:
@@ -410,7 +412,7 @@ if args.use_sampling:
     train_loader, val_loader, test_loader, dictionary = L2joint_dataloader_atten.create(
         args.data, dictfile, batchSize=1, workers=0, maxlen_prev=args.maxlen_prev,
 	maxlen_post=args.maxlen_post, use_sampling=True, errorfile=args.errorfile,
-	reference=args.reference)
+	reference=args.reference, ratio=args.ratio)
     train_loader.dataset.dictionary.use_sampling = False
     val_loader.dataset.dictionary.use_sampling = False
     test_loader.dataset.dictionary.use_sampling = False
@@ -458,7 +460,7 @@ if not args.evalmode:
         for epoch in range(1, args.epochs+1):
             epoch_start_time = time.time()
             # iterate through scp minibatches
-            if not args.use_sampling or epoch % 10 == 0:
+            if not args.use_sampling or epoch % 3 != 0:
                 for i, train_batched in enumerate(train_loader):
                     # Check if the context for this batch is filled
                     if i not in train_ids_dict_list:
@@ -480,11 +482,11 @@ if not args.evalmode:
 									   epoch)
                 logging('time elapsed is {:5.2f}s'.format((time.time() - epoch_start_time)))
 
-            # Process an additional epoch for error sampling every 3 epochs
+            # Process an additional epoch for error sampling every epoch
             elif args.use_sampling:
                 # Turn on error sampling
                 train_loader.dataset.dictionary.use_sampling = True
-                logging('Use error sampling, the extra epoch starts here!')
+                logging('Use error sampling, the sampled epoch starts here!')
                 additional_epoch_start_time = time.time()
                 for i, train_batched in enumerate(train_loader):
                     for j, segment in enumerate(train_batched):
