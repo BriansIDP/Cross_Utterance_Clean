@@ -9,11 +9,13 @@ from collections import defaultdict
 import numpy as np
 
 class ErrorSampling():
-    def __init__(self, dictionary, errorfile, hypothesis):
+    def __init__(self, dictionary, errorfile, hypothesis, ratio):
         self.errorfile = open(errorfile)
         self.dictionary = self.build_dict(dictionary)
         self.unigram = self.build_unigram(hypothesis)
-        self.build_confusion()
+        self.insertions = []
+        self.insertions_prob = []
+        self.build_confusion(ratio)
 
     def build_dict(self, dictfile):
         dictionary = {}
@@ -34,39 +36,58 @@ class ErrorSampling():
                         wordcount[word] += 1
         return wordcount
 
-    def build_confusion(self):
+    def build_confusion(self, ratio):
         current = ''
         for line in self.errorfile:
             elems = line.split()
             if elems != [] and elems[0] == 'CONFUSION':
                 current = 'CONFUSION'
             elif elems != [] and elems[0] == 'INSERTIONS':
+                current = 'INSERTIONS'
+            elif elems != [] and elems[0] == 'DELETIONS':
+                current = 'DELETIONS'
+            elif elems != [] and elems[0] == 'SUBSTITUTIONS':
                 break
-            if current != '' and elems != [] and ':' in elems[0]:
+            if current == 'CONFUSION' and elems != [] and ':' in elems[0]:
                 key = elems[3].upper()
                 value = elems[5].upper()
                 if key in self.unigram:
                     if value in self.dictionary:
                         self.dictionary[key]['alternatives'].append(value)
                         self.dictionary[key]['probabilities'].append(float(elems[1]))
-                    else:
-                        if 'OOV' in self.dictionary[key]['alternatives']:
-                            OOVind = self.dictionary[key]['alternatives'].index('OOV')
-                            self.dictionary[key]['probabilities'][OOVind] += float(elems[1])
-                        else:
-                            self.dictionary[key]['alternatives'].append('OOV')
-                            self.dictionary[key]['probabilities'].append(float(elems[1]))
+                    # else:
+                    #     if 'OOV' in self.dictionary[key]['alternatives']:
+                    #         OOVind = self.dictionary[key]['alternatives'].index('OOV')
+                    #         self.dictionary[key]['probabilities'][OOVind] += float(elems[1])
+                    #     else:
+                    #         self.dictionary[key]['alternatives'].append('OOV')
+                    #         self.dictionary[key]['probabilities'].append(float(elems[1]))
+            elif current == 'INSERTIONS' and elems != [] and ':' in elems[0]:
+                key = elems[3].upper()
+                if key in self.unigram:
+                    self.insertions.append(key)
+                    self.insertions_prob.append(float(elems[1]))
+            elif current == 'DELETIONS' and elems != [] and ':' in elems[0]:
+                key = elems[3].upper()
+                if key in self.unigram:
+                    self.dictionary[key]['alternatives'].append('')
+                    self.dictionary[key]['probabilities'].append(float(elems[1])/ratio)
+                
         for key, value in self.dictionary.items():
-            # Confusion pairs may contain more than what appeared in ref
-            # TODO: need to check why this is the case, for now we bias this estimation
             self.dictionary[key]['alternatives'].append(key)
-            self.dictionary[key]['probabilities'].append(self.unigram[key]/5 if self.unigram[key] != 0 else 1)
+            self.dictionary[key]['probabilities'].append(self.unigram[key]/ratio if self.unigram[key] != 0 else 1)
             total = sum(self.dictionary[key]['probabilities'])
             self.dictionary[key]['probabilities'] = [prob / total for prob in self.dictionary[key]['probabilities']]
+        # Do the same for insertions
+        insert_total = sum(self.insertions_prob)
+        self.insertions_prob = np.array(self.insertions_prob) / insert_total
 
-    def sample(self, word):
+    def sample(self, word, insert_prob=0.2):
         substitute = word
-        if word in self.dictionary:
+        if np.random.random() < insert_prob:
+            insertion = np.random.choice(self.insertions, p=self.insertions_prob)
+            substitute = word + ' ' + insertion
+        elif word in self.dictionary:
             distribution = self.dictionary[word]['probabilities']
             alternatives = self.dictionary[word]['alternatives']
             substitute = np.random.choice(alternatives, p=distribution)
@@ -76,5 +97,5 @@ if __name__ == "__main__":
     dictionary = sys.argv[1]
     errorfile = sys.argv[2]
     hypothesis = sys.argv[3]
-    sampler = ErrorSampling(dictionary, errorfile, hypothesis)
+    sampler = ErrorSampling(dictionary, errorfile, hypothesis, 5)
     import pdb; pdb.set_trace()
