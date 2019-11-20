@@ -5,14 +5,13 @@ import torch
 from ErrorSampling import ErrorSampling
 
 class Dictionary(object):
-    def __init__(self, dictfile, use_sampling=False, errorfile='', reference=''):
+    def __init__(self, dictfile, use_sampling=False, errorfile='', reference='', ratio=1):
         self.word2idx = {}
         self.idx2word = []
-        self.unigram = []
         self.build_dict(dictfile)
         self.use_sampling = use_sampling
         if use_sampling:
-            self.sampler = ErrorSampling(dictfile, errorfile, reference)
+            self.sampler = ErrorSampling(dictfile, errorfile, reference, ratio)
 
     def build_dict(self, dictfile):
         with open(dictfile, 'r', encoding="utf8") as f:
@@ -24,8 +23,6 @@ class Dictionary(object):
         if word not in self.word2idx:
             self.idx2word.append(word)
             self.word2idx[word] = len(self.idx2word) - 1
-            self.unigram.append(0)
-        self.unigram[self.word2idx[word]] += 1
         return self.word2idx[word]
 
     def get_eos(self):
@@ -43,18 +40,22 @@ class Dictionary(object):
 	    # Randomly introduce acoustic errors
             if self.use_sampling:
                 substitute = self.sampler.sample(word)
-                sampled_sent.append(
-		    self.word2idx[substitute] if substitute in self.word2idx else to_append)
+                substitutes = substitute.split()
+                if len(substitutes) == 1:
+                    sampled_sent.append(
+		        self.word2idx[substitutes[0]] if substitutes[0] in self.word2idx else to_append)
+                elif len(substitutes) == 2:
+                    sampled_sent.append(
+                        self.word2idx[substitutes[0]] if substitutes[0] in self.word2idx else to_append)
+                    sampled_sent.append(
+                        self.word2idx[substitutes[1]] if substitutes[1] in self.word2idx else 'OOV')
         if self.use_sampling:
             return sent, sampled_sent
         return sent, sent
 
-    def normalize_counts(self):
-        self.unigram /= np.sum(self.unigram)
-        self.unigram = self.unigram.tolist()
-
     def __len__(self):
         return len(self.idx2word)
+
 
 class LMdata(Dataset):
     def __init__(self, data_file, dictionary, maxlen_prev, maxlen_post):
@@ -125,9 +126,9 @@ def collate_fn(batch):
 
 def create(datapath, dictfile, batchSize=1,
            shuffle=False, workers=0, maxlen_prev=30,
-	   maxlen_post=30, use_sampling=False, errorfile='', reference=''):
+	   maxlen_post=30, use_sampling=False, errorfile='', reference='', ratio=1):
     loaders = []
-    dictionary = Dictionary(dictfile, use_sampling, errorfile, reference)
+    dictionary = Dictionary(dictfile, use_sampling, errorfile, reference, ratio)
     for split in ['train', 'valid', 'test']:
         data_file = os.path.join(datapath, '%s.scp' %split)
         dataset = LMdata(data_file, dictionary, maxlen_prev, maxlen_post)
