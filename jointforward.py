@@ -3,7 +3,9 @@ import argparse
 import sys, os
 import torch
 import math
+import torch.nn.functional as F
 from operator import itemgetter
+import time
 
 import data
 
@@ -391,7 +393,62 @@ def forward_each_utterance(model, line, forwardCrit, utt_idx, ngram_probs, aux_i
     out = '\t'.join([str(utt_idx), str(acoustic_score), '{:5.2f}'.format(rnnscore), '{:5.2f}'.format(total_score), ' '.join(utterance)+' <eos>\n'])
     return out, total_score, utterance, hidden
 
+# Forward each utterance batched
+def forward_each_utt_batched(model, lines, forwardCrit, utt_idx, aux_in, hidden):
+    # Process each line
+    inputs = []
+    targets = []
+    ac_scores = []
+    maxlen = 0
+    utterances = []
+    for line in lines:
+        linevec = line.strip().split()
+        ac_score = float(linevec[0])
+        utterance = linevec[4:-1]
+        currentline = []
+        for i, word in enumerate(utterance):
+            if word in dictionary:
+                currentline.append(int(dictionary[word]))
+            else:
+                currentline.append(int(dictionary['OOV']))
+        currentline = [eosidx] + currentline
+        currenttarget = currentline[1:]
+        currenttarget.append(eosidx)
+        inputs.append(currentline)
+        targets.append(currenttarget)
+        utterances.append(utterance)
+        ac_scores.append(ac_score)
+        if len(currentline) > maxlen:
+            maxlen = len(currentline)
+    mask = []
+    ac_score_tensor = torch.tensor(ac_scores).to(device)
+    for i, symbols in enumerate(inputs):
+        inputs[i] = symbols + [eosidx] * (maxlen - len(symbols))
+        targets[i] = targets[i] + [eosidx] * (maxlen - len(symbols))
+        mask.append([1.0] * len(symbols) + [0.0] * (maxlen - len(symbols)))
+    input_tensor = torch.LongTensor(inputs).to(device).t().contiguous()
+    target_tensor = torch.LongTensor(targets).to(device).t().contiguous()
+    mask_tensor = torch.tensor(mask).to(device).t().contiguous()
+    bsize = input_tensor.size(1)
+    seq_len = input_tensor.size(0)
+    aux_in = aux_in.repeat(seq_len, bsize, 1)
+    hidden = model.init_hidden(bsize)
+    output, hidden, _ = model(input_tensor, aux_in, hidden, eosidx=eosidx, device=device)
+    logProb = F.cross_entropy(output.view(-1, ntokens), target_tensor.view(-1), reduction='none')
+    rnnscores = torch.sum(logProb.view(seq_len, bsize)*mask_tensor, 0)
+    total_scores = - rnnscores *args.rnnscale + ac_score_tensor
+    # Get output in some format
+    outputlines = []
+    for i, utt in enumerate(utterances):
+        out = '\t'.join([str(utt_idx), '{:5.2f}'.format(ac_score_tensor[i]), '{:5.2f}'.format(rnnscores[i]), '{:5.2f}'.format(total_scores[i]), ' '.join(utt)+' <eos>\n'])
+        outputlines.append(out)
+    max_ind = torch.argmax(total_scores)
+    best_utt = utterances[max_ind]
+    best_hid = (hidden[0][:, max_ind, :], hidden[1][:, max_ind, :])
+    return best_utt, best_hid, outputlines
+
 def forward_nbest_utterance(model, FLvmodel, nbestfile):
+    start_time = time.time()
     logging('Start calculating language model scores')
     model.eval()
     model.set_mode('eval')
@@ -423,6 +480,7 @@ def forward_nbest_utterance(model, FLvmodel, nbestfile):
             sent_dict = FLvAttenForwarding(nbestfile+'.context', FLvmodel)
         elif args.arrange == 'atten_shared':
             sent_dict = SharedFLvAttenForwarding(nbestfile+'.context', FLvmodel, model)
+    print('time for forwarding context is {:5.2f}'.format(time.time()-start_time))
     with open(nbestfile) as filein:
         with torch.no_grad():
             for utterancefile in filein:
@@ -448,18 +506,21 @@ def forward_nbest_utterance(model, FLvmodel, nbestfile):
                 with open(utterancefile.strip()) as uttfile:
                     uttlines = uttfile.readlines()
                 uttscore = []
-                for i, line in enumerate(uttlines):
-                    if args.interp:
+                # Do re-ranking batch by batch
+                if not args.interp:
+                    bestutt, prev_hid, to_write = forward_each_utt_batched(model, uttlines, forwardCrit, utt_idx, current_aux_in, prev_hid)
+                else:
+                    for i, line in enumerate(uttlines):
                         ngram_elems = ngram_prob_lines[i].strip().split(' ')
                         sent_len = int(ngram_elems[0])
                         ngram_probs = ngram_elems[sent_len+2:]
-                    outputline, score, utt, hid = forward_each_utterance(model, line, forwardCrit, utt_idx, ngram_probs, current_aux_in, prev_hid)
-                    to_write.append(outputline)
-                    uttscore.append((utt, score, hid))
+                        outputline, score, utt, hid = forward_each_utterance(model, line, forwardCrit, utt_idx, ngram_probs, current_aux_in, prev_hid)
+                        to_write.append(outputline)
+                        uttscore.append((utt, score, hid))
+                    bestutt_group = max(uttscore, key=itemgetter(1))
+                    bestutt = bestutt_group[0]
+                    prev_hid = bestutt_group[2]
                 utt_idx += 1
-                bestutt_group = max(uttscore, key=itemgetter(1))
-                bestutt = bestutt_group[0]
-                prev_hid = bestutt_group[2]
                 best_utt_list.append((labname, bestutt))
                 if utt_idx % 100 == 0:
                     logging(str(utt_idx))
@@ -480,6 +541,7 @@ def forward_nbest_utterance(model, FLvmodel, nbestfile):
                 start += 100000
                 end += 100000
             fout.write('.\n')
+    print('total time used is {:5.2f}'.format(time.time()-start_time))
 
 # Main code begins
 model = readin_model()
