@@ -5,13 +5,13 @@ import torch
 from ErrorSampling import ErrorSampling
 
 class Dictionary(object):
-    def __init__(self, dictfile, use_sampling=False, errorfile='', reference='', ratio=1):
+    def __init__(self, dictfile, use_sampling=False, errorfile='', reference='', ratio=1, random=False):
         self.word2idx = {}
         self.idx2word = []
         self.build_dict(dictfile)
         self.use_sampling = use_sampling
         if use_sampling:
-            self.sampler = ErrorSampling(dictfile, errorfile, reference, ratio)
+            self.sampler = ErrorSampling(dictfile, errorfile, reference, ratio, random)
 
     def build_dict(self, dictfile):
         with open(dictfile, 'r', encoding="utf8") as f:
@@ -126,9 +126,10 @@ def collate_fn(batch):
 
 def create(datapath, dictfile, batchSize=1,
            shuffle=False, workers=0, maxlen_prev=30,
-	   maxlen_post=30, use_sampling=False, errorfile='', reference='', ratio=1):
+	   maxlen_post=30, use_sampling=False, errorfile='', reference='',
+           ratio=1, random=False):
     loaders = []
-    dictionary = Dictionary(dictfile, use_sampling, errorfile, reference, ratio)
+    dictionary = Dictionary(dictfile, use_sampling, errorfile, reference, ratio, random)
     for split in ['train', 'valid', 'test']:
         data_file = os.path.join(datapath, '%s.scp' %split)
         dataset = LMdata(data_file, dictionary, maxlen_prev, maxlen_post)

@@ -117,7 +117,9 @@ class L2RNNModel(nn.Module):
             mask = input != eosidx
             expandedmask = mask.unsqueeze(-1).expand_as(outputcell)
             expandedmask = expandedmask.float()
-            return (outputcell*expandedmask, memorycell*expandedmask)
+            mem_cancel = memorycell.clone().detach()
+            out_cancel = outputcell.clone().detach()
+            return (outputcell - out_cancel, memorycell - mem_cancel)
         else:
             mask = input != eosidx
             expandedmask = mask.unsqueeze(-1).expand_as(hidden)

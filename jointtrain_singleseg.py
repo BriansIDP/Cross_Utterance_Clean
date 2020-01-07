@@ -9,8 +9,8 @@ import gc
 
 import L2joint_dataloader_atten
 from model import RNNModel
-from L2model import L2RNNModel
-from AttenFlvmodel import AttenFlvModel
+from L2model_debug import L2RNNModel
+from AttenFlvmodel_debug import AttenFlvModel
 
 arglist = []
 parser = argparse.ArgumentParser(description='PyTorch Level-2 RNN/LSTM Language Model')
@@ -96,6 +96,10 @@ parser.add_argument('--reference', type=str, default='train.ref',
                     help='location of the reference file')
 parser.add_argument('--ratio', type=float, default=1,
                     help='error sampling ratio')
+parser.add_argument('--sample_freq', type=int, default=30,
+                    help='sample every x epochs')
+parser.add_argument('--randsample', action='store_true',
+                    help='sample randomly, no acoustic error distributions')
 args = parser.parse_args()
 
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -151,10 +155,30 @@ def showmem():
                 print(type(obj), obj.size())
         except: pass
 
-def get_needed_utterance(utt_index, utt_prev, utt_post, bsz, bptt):
+def get_needed_utterance_old(utt_index, utt_prev, utt_post, bsz, bptt):
     prev_context = torch.index_select(utt_prev, 0, utt_index)
     post_context = torch.index_select(utt_post, 0, utt_index)
     return prev_context.view(bptt, bsz, -1), post_context.view(bptt, bsz, -1)
+
+def get_needed_utterance(utt_index, utt_prev, utt_post):
+    seen_utt = {}
+    prev_sent_needed = []
+    post_sent_needed = []
+    virtual_address = []
+    virtual_pointer = 0
+    for utt_id in utt_index:
+        if utt_id.item() not in seen_utt:
+            prev_sent_needed.append(utt_prev[utt_id])
+            post_sent_needed.append(utt_post[utt_id])
+            seen_utt[utt_id.item()] = virtual_pointer
+            virtual_pointer += 1
+        virtual_address.append(seen_utt[utt_id.item()])
+    return torch.cat(prev_sent_needed), torch.cat(post_sent_needed), torch.LongTensor(virtual_address)
+
+def fill_uttemb_batch(utt_embeddings, embind, bsz, bptt):
+    '''Fill current batch with corresponding utterances'''
+    batched_utt_embeddings = torch.index_select(utt_embeddings, 0, embind)
+    return batched_utt_embeddings.view(bptt, bsz, -1)
 
 def repackage_hidden(h):
     """Wraps hidden states in new Tensors, to detach them from their history."""
@@ -234,33 +258,37 @@ def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
             data, ind, targets, seq_len = get_batch(evaldata, sent_ind_batched, i)
             # check if the batch context idices are already filled
             if batch not in ids_dict:
-                prev_utts, post_utts = get_needed_utterance(
-		    ind.view(-1), utt_dict_prev, utt_dict_post, eval_batch_size, seq_len) 
-                ids_dict[batch] = (prev_utts, post_utts)
+                prev_utts, post_utts, ind_lookup = get_needed_utterance(
+		    ind.view(-1), utt_dict_prev, utt_dict_post) 
+                ids_dict[batch] = (prev_utts, post_utts, ind_lookup)
             else:
-                prev_utts, post_utts = ids_dict[batch]
+                prev_utts, post_utts, ind_lookup = ids_dict[batch]
             prev_utts_tensor = prev_utts.view(-1, max(1, args.maxlen_prev))
             post_utts_tensor = post_utts.view(-1, max(1, args.maxlen_post))
             FLvbatchsize = prev_utts_tensor.size(0)
+            ind_lookup = ind_lookup.to(device)
             # Forward previous context information
             batched_embeddings = None
             if args.useatten:
                 FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
                 if args.maxlen_prev != 0:
+                    prev_embeddings = model.get_word_emb(prev_utts_tensor.t().contiguous().to(device))
                     prev_extracted, prevpenalty = FLvmodel(
-		        prev_utts_tensor.t().contiguous().to(device), FLvhidden, device, eosidx)
+		        prev_embeddings, FLvhidden, device, eosidx)
                 else:
                     prev_extracted, prevpenalty = (
 		        torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+                auxinput_prev = fill_uttemb_batch(prev_extracted, ind_lookup, eval_batch_size, seq_len)
                 FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
                 if args.maxlen_post != 0:
+                    post_embeddings = model.get_word_emb(post_utts_tensor.t().contiguous().to(device))
                     post_extracted, postpenalty = FLvmodel(
-		        post_utts_tensor.t().contiguous().to(device), FLvhidden, device, eosidx)
+		        post_embeddings, FLvhidden, device, eosidx)
                 else:
                     post_extracted, postpenalty = (
 		        torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
-                auxinput = torch.cat([prev_extracted, post_extracted], 1)
-                auxinput = auxinput.view(seq_len, eval_batch_size, -1)
+                auxinput_post = fill_uttemb_batch(post_extracted, ind_lookup, eval_batch_size, seq_len)
+                auxinput = torch.cat([auxinput_prev, auxinput_post], 2)
 
             # Here begins the forward path for second level LM
             output, hidden, penalty = model(
@@ -306,41 +334,43 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
     prev_batched_embeddings = None
     post_batched_embeddings = None
     for batch, i in enumerate(range(0, traindata.size(0) - 1, args.bptt)):
-        # showmem()
-        # import pdb; pdb.set_trace()
         data, ind, targets, seq_len = get_batch(traindata, sent_ind_batched, i)
         # check if the batch context idices are already filled
         if batch not in ids_dict:
-            prev_utts, post_utts = get_needed_utterance(ind.view(-1), utt_dict_prev,
-	        utt_dict_post, args.batchsize, seq_len)
-            ids_dict[batch] = (prev_utts, post_utts)
+            prev_utts, post_utts, ind_lookup = get_needed_utterance(
+                ind.view(-1), utt_dict_prev, utt_dict_post)
+            ids_dict[batch] = (prev_utts, post_utts, ind_lookup)
         else:
-            prev_utts, post_utts = ids_dict[batch]
+            prev_utts, post_utts, ind_lookup = ids_dict[batch]
         prev_utts_tensor = prev_utts.view(-1, max(1, args.maxlen_prev))
         post_utts_tensor = post_utts.view(-1, max(1, args.maxlen_post))
         FLvbatchsize = prev_utts_tensor.size(0)
+        ind_lookup = ind_lookup.to(device)
         # Forward previous context information
 
         batched_embeddings = None
         if args.useatten:
             FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
             if args.maxlen_prev != 0:
-                prev_extracted, prevpenalty = FLvmodel(prev_utts_tensor.t().contiguous().to(device),
+                prev_embeddings = model.get_word_emb(prev_utts_tensor.t().contiguous().to(device))
+                prev_extracted, prevpenalty = FLvmodel(prev_embeddings,
 		                                       FLvhidden,
 						       device=device,
 						       eosidx=eosidx)
             else:
                 prev_extracted, prevpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+            auxinput_prev = fill_uttemb_batch(prev_extracted, ind_lookup, args.batchsize, seq_len)
             FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
             if args.maxlen_post != 0:
-                post_extracted, postpenalty = FLvmodel(post_utts_tensor.t().contiguous().to(device),
+                post_embeddings = model.get_word_emb(post_utts_tensor.t().contiguous().to(device))
+                post_extracted, postpenalty = FLvmodel(post_embeddings,
 		                                       FLvhidden,
 						       device=device,
 						       eosidx=eosidx)
             else:
                 post_extracted, postpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
-            auxinput = torch.cat([prev_extracted, post_extracted], 1)
-            auxinput = auxinput.view(seq_len, args.batchsize, -1)
+            auxinput_post = fill_uttemb_batch(post_extracted, ind_lookup, args.batchsize, seq_len)
+            auxinput = torch.cat([auxinput_prev, auxinput_post], 2)
             FLvpenalty = prevpenalty + postpenalty
 
         hidden = repackage_hidden(hidden)
@@ -356,12 +386,9 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
             # import pdb; pdb.set_trace()
             ploss.backward()
 
-        # showmem()
-        # import pdb; pdb.set_trace()
-
         if FLvmodel.mode == 'train' and batch % args.updatedelay == 0:
             # Clip gradients for first level LM
-            torch.nn.utils.clip_grad_norm_(FLvmodel.parameters(), args.FLvclip)
+            torch.nn.utils.clip_grad_value_(FLvmodel.parameters(), args.FLvclip)
             # Optimise only the first level LM
             FLvoptimizer.step()
             FLvmodel.zero_grad()
@@ -412,7 +439,7 @@ if args.use_sampling:
     train_loader, val_loader, test_loader, dictionary = L2joint_dataloader_atten.create(
         args.data, dictfile, batchSize=1, workers=0, maxlen_prev=args.maxlen_prev,
 	maxlen_post=args.maxlen_post, use_sampling=True, errorfile=args.errorfile,
-	reference=args.reference, ratio=args.ratio)
+	reference=args.reference, ratio=args.ratio, random=args.randsample)
     train_loader.dataset.dictionary.use_sampling = False
     val_loader.dataset.dictionary.use_sampling = False
     test_loader.dataset.dictionary.use_sampling = False
@@ -428,9 +455,8 @@ logging('Instantiating models and criteria')
 FLvpretrained = torch.load(args.FLvmodel)
 if not args.evalmode:
     if args.useatten:
-        FLvmodel = AttenFlvModel(ntokens, args.emsize, args.nhid, args.nlayers,
+        FLvmodel = AttenFlvModel(args.emsize, FLvpretrained.nhid, 1,
 	                         args.nhid, args.dropout, nhead=args.nhead).to(device)
-        FLvmodel.encoder.load_state_dict(FLvpretrained.encoder.state_dict())
         FLvmodel.rnn.load_state_dict(FLvpretrained.rnn.state_dict())
         FLvmodel.rnn.flatten_parameters()
     elif args.scratch:
@@ -460,7 +486,7 @@ if not args.evalmode:
         for epoch in range(1, args.epochs+1):
             epoch_start_time = time.time()
             # iterate through scp minibatches
-            if not args.use_sampling or epoch % 3 != 0:
+            if not args.use_sampling or epoch % args.sample_freq != 0:
                 for i, train_batched in enumerate(train_loader):
                     # Check if the context for this batch is filled
                     if i not in train_ids_dict_list:
