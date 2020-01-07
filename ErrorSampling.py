@@ -9,13 +9,16 @@ from collections import defaultdict
 import numpy as np
 
 class ErrorSampling():
-    def __init__(self, dictionary, errorfile, hypothesis, ratio):
+    def __init__(self, dictionary, errorfile, hypothesis, ratio, random=False):
         self.errorfile = open(errorfile)
         self.dictionary = self.build_dict(dictionary)
+        self.wordlist = list(self.dictionary.keys())
         self.unigram = self.build_unigram(hypothesis)
         self.insertions = []
         self.insertions_prob = []
-        self.build_confusion(ratio)
+        if not random:
+            self.build_confusion(ratio)
+        self.random = random
 
     def build_dict(self, dictfile):
         dictionary = {}
@@ -82,15 +85,25 @@ class ErrorSampling():
         insert_total = sum(self.insertions_prob)
         self.insertions_prob = np.array(self.insertions_prob) / insert_total
 
-    def sample(self, word, insert_prob=0.2):
+    def sample(self, word, insert_prob=0.05):
         substitute = word
-        if np.random.random() < insert_prob:
-            insertion = np.random.choice(self.insertions, p=self.insertions_prob)
-            substitute = word + ' ' + insertion
-        elif word in self.dictionary:
-            distribution = self.dictionary[word]['probabilities']
-            alternatives = self.dictionary[word]['alternatives']
-            substitute = np.random.choice(alternatives, p=distribution)
+        if self.random and np.random.random() < 0.2:
+            toss = np.random.random()
+            randind = np.random.randint(0, len(self.wordlist))
+            if toss > 0.7:
+                substitute = ''
+            elif toss < 0.2:
+                substitute = word + ' ' + self.wordlist[randind]
+            else:
+                substitute = self.wordlist[randind]
+        elif not self.random:
+            if np.random.random() < insert_prob:
+                insertion = np.random.choice(self.insertions, p=self.insertions_prob)
+                substitute = word + ' ' + insertion
+            elif word in self.dictionary:
+                distribution = self.dictionary[word]['probabilities']
+                alternatives = self.dictionary[word]['alternatives']
+                substitute = np.random.choice(alternatives, p=distribution)
         return substitute
 
 if __name__ == "__main__":
