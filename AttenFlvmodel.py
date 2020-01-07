@@ -1,5 +1,5 @@
 import torch.nn as nn
-from torch import cat, zeros, rand, arange, ger
+from torch import cat, zeros, rand, arange, ger, sum
 from torch.autograd import Variable
 from SelfAtten import SelfAttenModel
 
@@ -78,16 +78,8 @@ class AttenFlvModel(nn.Module):
             output = self.emb_drop(output)
             output = emb
         else:
-            if self.reset:
-                output_list = []
-                for i in range(emb.size(0)):
-                    resethidden = self.resetsent(hidden, input[i,:], eosidx)
-                    each_output, hidden = self.rnn(emb[i,:,:].view(1,emb.size(1),-1), resethidden)
-                    output_list.append(each_output)
-                output = cat(output_list, 0)
-            else:
-                output, hidden = self.rnn(emb, hidden)
-        extracted, penalty = self.selfatten(output.transpose(0,1), device=device, wordlevel=True)
+            output, hidden = self.rnn(emb, hidden)
+        extracted, penalty = self.selfatten(output.transpose(0,1).contiguous(), device=device, wordlevel=True)
         return extracted, penalty 
 
     def init_hidden(self, bsz):
