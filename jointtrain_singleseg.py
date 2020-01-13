@@ -10,7 +10,7 @@ import gc
 import L2joint_dataloader_atten
 from model import RNNModel
 from L2model_debug import L2RNNModel
-from AttenFlvmodel_debug import AttenFlvModel
+from AttenFlvmodel import AttenFlvModel
 
 arglist = []
 parser = argparse.ArgumentParser(description='PyTorch Level-2 RNN/LSTM Language Model')
