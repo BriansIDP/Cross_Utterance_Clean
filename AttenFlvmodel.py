@@ -1,5 +1,5 @@
 import torch.nn as nn
-from torch import cat, zeros, rand, arange, ger, sum
+from torch import cat, zeros, rand, arange, ger
 from torch.autograd import Variable
 from SelfAtten import SelfAttenModel
 
@@ -24,7 +24,7 @@ class PositionalEmbedding(nn.Module):
 class AttenFlvModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder."""
 
-    def __init__(self, ntoken, ninp, nhid, nlayers, nmid,
+    def __init__(self, ninp, nhid, nlayers, nmid,
                  dropout=0.5, tie_weights=False, reset=0, nhead=1):
         """ntoken: vocabulary size
            ninp: word emb size
@@ -37,7 +37,6 @@ class AttenFlvModel(nn.Module):
 	"""
         super(AttenFlvModel, self).__init__()
         self.drop = nn.Dropout(dropout)
-        self.encoder = nn.Embedding(ntoken, ninp)
         self.selfatten = SelfAttenModel(nhid, nmid, nhead)
         self.rnn = nn.LSTM(ninp, nhid, nlayers, dropout=dropout)
         self.pos_emb = PositionalEmbedding(ninp)
@@ -59,16 +58,14 @@ class AttenFlvModel(nn.Module):
 
     def init_weights(self):
         initrange = 0.1
-        self.encoder.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, input, hidden, device='cuda', eosidx=1, direct=False):
-        """input: word idx
+    def forward(self, emb, hidden, device='cuda', eosidx=1, direct=False):
+        """emb: input word embedding
            hidden: initial/carries hidden states
            device: cuda or cpu
            eosidx: end of sequence idx
            direct: use word embeddings directly or after LSTM encoding
         """
-        emb = self.drop(self.encoder(input))
         if direct:
             # Adding positional encoding
             pos_seq = arange(input.size(0)-1, -1, -1.0, dtype=emb.dtype).to(device)
@@ -79,7 +76,7 @@ class AttenFlvModel(nn.Module):
             output = emb
         else:
             output, hidden = self.rnn(emb, hidden)
-        extracted, penalty = self.selfatten(output.transpose(0,1).contiguous(), device=device, wordlevel=True)
+        extracted, penalty = self.selfatten(output.transpose(0,1), device=device, wordlevel=True)
         return extracted, penalty 
 
     def init_hidden(self, bsz):
