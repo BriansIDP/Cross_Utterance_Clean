@@ -110,18 +110,19 @@ class L2RNNModel(nn.Module):
         else:
             return weight.new_zeros(self.nlayers, bsz, self.nhid)
 
-    def resetsent(self, hidden, input, eosidx):
+    def resetsent(self, hidden, input, eosidx, noiselevel=1):
         if self.rnn_type == 'LSTM':
             outputcell = hidden[0]
             memorycell = hidden[1]
             mask = input != eosidx
             expandedmask = mask.unsqueeze(-1).expand_as(outputcell)
             expandedmask = expandedmask.float()
-            mem_cancel = memorycell.clone().detach()
-            out_cancel = outputcell.clone().detach()
-            return (outputcell - out_cancel, memorycell - mem_cancel)
+            return (outputcell*expandedmask, memorycell*expandedmask)
         else:
             mask = input != eosidx
             expandedmask = mask.unsqueeze(-1).expand_as(hidden)
             expandedmask = expandedmask.float()
             return hidden*expandedmask
+
+    def get_word_emb(self, input_seq):
+        return self.drop(self.encoder(input_seq))
