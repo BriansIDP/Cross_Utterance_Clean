@@ -74,7 +74,7 @@ class ErrorSampling():
                 key = elems[3].upper()
                 if key in self.unigram:
                     self.dictionary[key]['alternatives'].append('')
-                    self.dictionary[key]['probabilities'].append(float(elems[1])/ratio)
+                    self.dictionary[key]['probabilities'].append(float(elems[1]))
                 
         for key, value in self.dictionary.items():
             self.dictionary[key]['alternatives'].append(key)
@@ -87,7 +87,7 @@ class ErrorSampling():
 
     def sample(self, word, insert_prob=0.05):
         substitute = word
-        if self.random and np.random.random() < 0.2:
+        if self.random and np.random.random() < 0.1:
             toss = np.random.random()
             randind = np.random.randint(0, len(self.wordlist))
             if toss > 0.7:
