@@ -1,10 +1,11 @@
-export CUDA_VISIBLE_DEVICES=0 #${X_SGE_CUDA_DEVICE}
+export CUDA_VISIBLE_DEVICES=${X_SGE_CUDA_DEVICE}
 export PATH="/home/dawna/gs534/Software/anaconda3/bin:$PATH"
 
-exp_no=10
-model_name="atten_range"
-prev_len=128
-post_len=128
+exp_no=1
+model_name="atten"
+prev_len=36
+post_len=36
+seglen=36
 
 FlvmodelPath=${PWD}/models
 expdir=${PWD}/${model_name}_${prev_len}_${post_len}_${exp_no}
@@ -17,17 +18,18 @@ python jointtrain_singleseg.py \
     --nhid 768 \
     --emsize 256 \
     --lr 10 \
-    --FLlr 0.5 \
+    --FLlr 1.0 \
     --clip 0.25 \
     --FLvclip 2 \
     --batchsize 64 \
     --wdecay 2e-6 \
     --bptt 12 \
-    --naux 512 \
+    --naux 768 \
     --reset 1 \
     --epochs 30 \
     --maxlen_prev $prev_len \
     --maxlen_post $post_len \
+    --seglen ${seglen} \
     --FLvmodel Flvmodel/model.pt \
     --save ${expdir}/L2model.new_${model_name}.${prev_len}_${post_len}_${exp_no}.pt \
     --FLvsave ${expdir}/L2model.FLv.new_${model_name}.${prev_len}_${post_len}_${exp_no}.pt \
@@ -37,9 +39,3 @@ python jointtrain_singleseg.py \
     --useatten \
     --nhead 1 \
     --alpha 0.0000 \
-    # --use_sampling \
-    # --errorfile error_sampling/work/confusions.txt \
-    # --reference error_sampling/train.ref \
-    # --ratio 5 \
-    # --sample_freq 1 \
-    # --randsample
