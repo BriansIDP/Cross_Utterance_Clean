@@ -51,9 +51,12 @@ class L2RNNModel(nn.Module):
             self.decoder.weight = self.encoder.weight
 
         self.rnn_type = rnn_type
+        self.ninp = ninp
         self.nhid = nhid
         self.atten = atten
         self.naux = naux
+        self.nutt = nutt
+        self.nseg = nseg
         self.nhead = nhead
         self.nlayers = nlayers
         self.reset = reset
