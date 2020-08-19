@@ -56,6 +56,8 @@ parser.add_argument('--overlap', type=int, default=0,
                     help='No. of word overlap between 2 segments')
 parser.add_argument('--sepchunk', action='store_true',
                     help='Use separate RNNs for segments')
+parser.add_argument('--map', type=str, default='nbest/dev.map',
+                    help='AMI name mapping file')
 args = parser.parse_args()
 
 def logging(s, print_=True, log_=True):
@@ -295,13 +297,23 @@ def FLvAttenForwarding(infile, FLvmodel):
                 sent_tank_post += [eosidx] * (args.maxlen - len(sent_tank_post))
             else:
                 sent_tank_post = sent_tank_post[:args.maxlen]
+
+            # Try splitting the context
+            splits = args.maxlen // args.seglen
+
             # Start forwarding
-            input_prev = torch.LongTensor(sent_tank_prev).to(device).view(1, -1).t()
-            FLvhidden = FLvmodel.init_hidden(1)
-            prev_extracted, prevpenalty = FLvmodel(input_prev, FLvhidden, device=device)
+            input_prev = torch.LongTensor(sent_tank_prev).to(device).view(1, -1)
+            input_prev = input_prev.view(-1, args.seglen)
+            FLvhidden = FLvmodel.init_hidden(splits)
+            prev_extracted, prevpenalty = FLvmodel(input_prev.t(), FLvhidden, device=device)
+            prev_extracted = prev_extracted.view(1, -1)
+
             input_post = torch.LongTensor(sent_tank_post).to(device).view(1, -1).t()
-            FLvhidden = FLvmodel.init_hidden(1)
-            post_extracted, postpenalty = FLvmodel(input_post, FLvhidden, device=device)
+            input_post = input_post.view(-1, args.seglen)
+            FLvhidden = FLvmodel.init_hidden(splits)
+            post_extracted, postpenalty = FLvmodel(input_post.t(), FLvhidden, device=device)
+            post_extracted = post_extracted.view(1, -1)
+
             sentdict[i] = torch.cat([prev_extracted, post_extracted], 1)
             if i % 1000 == 0:
                 logging('first level completed: ' + str(i))
@@ -342,15 +354,23 @@ def SharedFLvAttenForwarding(infile, FLvmodel, model):
                 sent_tank_post += [eosidx] * (args.maxlen - len(sent_tank_post))
             else:
                 sent_tank_post = sent_tank_post[:args.maxlen]
+
+            # Try splitting the context
+            splits = args.maxlen // args.seglen
+
             # Start forwarding
-            input_prev = torch.LongTensor(sent_tank_prev).to(device).view(1, -1).t().contiguous()
+            input_prev = torch.LongTensor(sent_tank_prev).to(device).view(splits, args.seglen).t().contiguous()
             prev_emb = model.get_word_emb(input_prev)
-            FLvhidden = FLvmodel.init_hidden(1)
+            FLvhidden = FLvmodel.init_hidden(splits)
             prev_extracted, prevpenalty = FLvmodel(prev_emb, FLvhidden, device=device)
-            input_post = torch.LongTensor(sent_tank_post).to(device).view(1, -1).t().contiguous()
+            prev_extracted = prev_extracted.view(1, -1)
+
+            input_post = torch.LongTensor(sent_tank_post).to(device).view(splits, args.seglen).t().contiguous()
             post_emb = model.get_word_emb(input_post)
-            FLvhidden = FLvmodel.init_hidden(1)
+            FLvhidden = FLvmodel.init_hidden(splits)
             post_extracted, postpenalty = FLvmodel(post_emb, FLvhidden, device=device)
+            post_extracted = post_extracted.view(1, -1)
+
             sentdict[i] = torch.cat([prev_extracted, post_extracted], 1)
             if i % 1000 == 0:
                 logging('first level completed: ' + str(i))
@@ -394,7 +414,7 @@ def forward_each_utterance(model, line, forwardCrit, utt_idx, ngram_probs, aux_i
     return out, total_score, utterance, hidden
 
 # Forward each utterance batched
-def forward_each_utt_batched(model, lines, forwardCrit, utt_idx, aux_in, hidden):
+def forward_each_utt_batched(model, lines, forwardCrit, utt_name, aux_in, hidden):
     # Process each line
     inputs = []
     targets = []
@@ -440,8 +460,8 @@ def forward_each_utt_batched(model, lines, forwardCrit, utt_idx, aux_in, hidden)
     # Get output in some format
     outputlines = []
     for i, utt in enumerate(utterances):
-        out = '\t'.join([str(utt_idx), '{:5.2f}'.format(ac_score_tensor[i]), '{:5.2f}'.format(rnnscores[i]), '{:5.2f}'.format(total_scores[i]), ' '.join(utt)+' <eos>\n'])
-        outputlines.append(out)
+        out = ' '.join([utt_name+'-'+str(i+1), '{:5.2f}'.format(rnnscores[i])])
+        outputlines.append(out+'\n')
     max_ind = torch.argmax(total_scores)
     best_utt = utterances[max_ind]
     best_hid = (hidden[0][:, max_ind, :], hidden[1][:, max_ind, :])
@@ -461,6 +481,7 @@ def forward_nbest_utterance(model, FLvmodel, nbestfile):
         forwardCrit = torch.nn.CrossEntropyLoss()
     ngram_cursor = 0
     to_write = []
+    lmscored_lines = []
     best_utt_list = []
     emb_list = []
     utt_idx = 0
@@ -508,7 +529,7 @@ def forward_nbest_utterance(model, FLvmodel, nbestfile):
                 uttscore = []
                 # Do re-ranking batch by batch
                 if not args.interp:
-                    bestutt, prev_hid, to_write = forward_each_utt_batched(model, uttlines, forwardCrit, utt_idx, current_aux_in, prev_hid)
+                    bestutt, prev_hid, to_write = forward_each_utt_batched(model, uttlines, forwardCrit, labname[:-4], current_aux_in, prev_hid)
                 else:
                     for i, line in enumerate(uttlines):
                         ngram_elems = ngram_prob_lines[i].strip().split(' ')
@@ -522,15 +543,23 @@ def forward_nbest_utterance(model, FLvmodel, nbestfile):
                     prev_hid = bestutt_group[2]
                 utt_idx += 1
                 best_utt_list.append((labname, bestutt))
+                lmscored_lines += to_write
                 if utt_idx % 100 == 0:
                     logging(str(utt_idx))
                 # print(utt_idx)
     with open(nbestfile+'.renew.'+args.lm, 'w') as fout:
-        fout.writelines(to_write)
+        fout.writelines(lmscored_lines)
+
+    mapping = {}
+    with open(args.map) as fin:
+        for line in fin:
+            value, key, _, ctmstart, _ = line.split()
+            _, meeting, headset, _ = value.split('_')
+            mapping[key] = value
     with open(nbestfile + '.1best.'+args.lm, 'w') as fout:
         fout.write('#!MLF!#\n')
         for eachutt in best_utt_list:
-            labname = eachutt[0]
+            labname = mapping[eachutt[0][:-4]]
             start = 100000
             end = 200000
             fout.write('\"'+labname+'\"\n')
