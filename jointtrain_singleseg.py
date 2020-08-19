@@ -9,7 +9,7 @@ import gc
 
 import L2joint_dataloader_atten
 from model import RNNModel
-from L2model_debug import L2RNNModel
+from L2model import L2RNNModel
 from AttenFlvmodel import AttenFlvModel
 
 arglist = []
@@ -88,6 +88,8 @@ parser.add_argument('--maxlen_prev', type=int, default=30,
                     help='Maximum number of words to look back')
 parser.add_argument('--maxlen_post', type=int, default=30,
                     help='Maximum number of words to look back')
+parser.add_argument('--seglen', type=int, default=30,
+                    help='Segment length to split context into')
 parser.add_argument('--use_sampling', action='store_true',
                     help='Use error sampling')
 parser.add_argument('--errorfile', type=str, default='confusion.txt',
@@ -100,6 +102,8 @@ parser.add_argument('--sample_freq', type=int, default=30,
                     help='sample every x epochs')
 parser.add_argument('--randsample', action='store_true',
                     help='sample randomly, no acoustic error distributions')
+parser.add_argument('--tied', action='store_true',
+                    help='Tie weights between encoder and decoder')
 args = parser.parse_args()
 
 device = torch.device("cuda" if args.cuda else "cpu")
@@ -140,7 +144,7 @@ if args.useatten:
 torch.manual_seed(args.seed)
 lr = args.lr
 FLlr = args.FLlr
-eval_batch_size = 10
+eval_batch_size = 1
 context = args.context.strip().split(' ')
 context = [int(i) for i in context]
 embmultsize = args.outputcell
@@ -265,6 +269,14 @@ def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
                 prev_utts, post_utts, ind_lookup = ids_dict[batch]
             prev_utts_tensor = prev_utts.view(-1, max(1, args.maxlen_prev))
             post_utts_tensor = post_utts.view(-1, max(1, args.maxlen_post))
+
+            # Try splitting the context
+            original_bsize = prev_utts_tensor.size(0)
+            if args.maxlen_prev % args.seglen == 0:
+                prev_utts_tensor = prev_utts_tensor.view(-1, args.seglen)
+            if args.maxlen_post % args.seglen == 0:
+                post_utts_tensor = post_utts_tensor.view(-1, args.seglen)
+
             FLvbatchsize = prev_utts_tensor.size(0)
             ind_lookup = ind_lookup.to(device)
             # Forward previous context information
@@ -278,6 +290,7 @@ def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
                 else:
                     prev_extracted, prevpenalty = (
 		        torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+                prev_extracted = prev_extracted.view(original_bsize, -1)
                 auxinput_prev = fill_uttemb_batch(prev_extracted, ind_lookup, eval_batch_size, seq_len)
                 FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
                 if args.maxlen_post != 0:
@@ -287,6 +300,7 @@ def evaluate(evaldata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
                 else:
                     post_extracted, postpenalty = (
 		        torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+                post_extracted = post_extracted.view(original_bsize, -1)
                 auxinput_post = fill_uttemb_batch(post_extracted, ind_lookup, eval_batch_size, seq_len)
                 auxinput = torch.cat([auxinput_prev, auxinput_post], 2)
 
@@ -344,10 +358,17 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
             prev_utts, post_utts, ind_lookup = ids_dict[batch]
         prev_utts_tensor = prev_utts.view(-1, max(1, args.maxlen_prev))
         post_utts_tensor = post_utts.view(-1, max(1, args.maxlen_post))
+
+        # Try splitting the context
+        original_bsize = prev_utts_tensor.size(0)
+        if args.maxlen_prev % args.seglen == 0:
+            prev_utts_tensor = prev_utts_tensor.view(-1, args.seglen)
+        if args.maxlen_post % args.seglen == 0:
+            post_utts_tensor = post_utts_tensor.view(-1, args.seglen)
+
         FLvbatchsize = prev_utts_tensor.size(0)
         ind_lookup = ind_lookup.to(device)
         # Forward previous context information
-
         batched_embeddings = None
         if args.useatten:
             FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
@@ -359,6 +380,7 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
 						       eosidx=eosidx)
             else:
                 prev_extracted, prevpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+            prev_extracted = prev_extracted.view(original_bsize, -1)
             auxinput_prev = fill_uttemb_batch(prev_extracted, ind_lookup, args.batchsize, seq_len)
             FLvhidden = FLvmodel.init_hidden(FLvbatchsize)
             if args.maxlen_post != 0:
@@ -369,6 +391,7 @@ def train(traindata, sent_ind_batched, utt_dict_prev, utt_dict_post, model,
 						       eosidx=eosidx)
             else:
                 post_extracted, postpenalty = (torch.zeros(FLvbatchsize, emb_size*args.nhead).to(device), 0)
+            post_extracted = post_extracted.view(original_bsize, -1)
             auxinput_post = fill_uttemb_batch(post_extracted, ind_lookup, args.batchsize, seq_len)
             auxinput = torch.cat([auxinput_prev, auxinput_post], 2)
             FLvpenalty = prevpenalty + postpenalty
@@ -466,9 +489,16 @@ if not args.evalmode:
         FLvmodel = torch.load(args.FLvmodel)
         FLvmodel.rnn.flatten_parameters()
     # Here set atten flag to be False for 2nd level LM
-    model = L2RNNModel(args.model, ntokens, args.emsize, FLvmodel.nhid, args.nhead*2,
+    # Check split
+    prev_sp = 1
+    post_sp = 1
+    if args.maxlen_prev % args.seglen == 0:
+        prev_sp = args.maxlen_prev // args.seglen
+    if args.maxlen_post % args.seglen == 0:
+        post_sp = args.maxlen_post // args.seglen
+    model = L2RNNModel(args.model, ntokens, args.emsize, FLvmodel.nhid, args.nhead*(prev_sp+post_sp),
                        args.naux, args.nhid, args.nlayers, False, args.dropout, reset=args.reset,
-		       nhead=args.nhead).to(device)
+		               nhead=args.nhead, tie_weights=args.tied).to(device)
 criterion = nn.CrossEntropyLoss()
 interpCrit = nn.CrossEntropyLoss(reduction='none')
 
